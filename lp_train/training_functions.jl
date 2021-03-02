@@ -1,7 +1,112 @@
-using LinearAlgebra, JuMP, GLPK, Random
+using LinearAlgebra, JuMP, GLPK, Ipopt, Random
 
-# TODO: Make LP params a struct instead of passing c, A, b, S, G, h, T to everything
+# TODO: Make QP params a struct instead of passing Q, q, A, b, S, G, h, T to everything
 
+# Compute optimal solution to a QP. Returns y_opt, μ_opt, μ˜_opt
+function solve_QP(x, Q, q, A, b, S, G, h, T)
+	model = Model(Ipopt.Optimizer)
+	set_optimizer_attribute(model, "print_level", 0)
+	@variable(model, y[1:length(q)])
+	@objective(model, Min, 0.5*y'*Q*y + q⋅y)
+	@constraint(model, con_μ[i in 1:length(b)],  A[i,:]⋅y <= b[i] + S[i,:]⋅x)
+	@constraint(model, con_μ˜[i in 1:length(h)], G[i,:]⋅y <= h[i] + T[i,:]⋅x)
+	optimize!(model)
+
+	if termination_status(model) == MOI.LOCALLY_SOLVED # I don't like how JuMP doesn't recognize this as being a global solution
+		return value.(y), dual.(con_μ), dual.(con_μ˜)
+	else
+		@show termination_status(model)
+		error("QP error!")
+	end
+end
+
+# computes loss over all data points. Not dividing by num_samples
+function mse_loss(X, Y, Q, q, A, b, S, G, h, T)
+	loss = 0
+	for i in 1:length(X)
+		ŷ, nothing, nothing = solve_QP(X[i], Q, q, A, b, S, G, h, T)
+		loss += norm(ŷ - Y[i])^2
+	end
+	return loss
+end
+
+# Compute gradient of loss w.r.t. learnable parameters for one sample
+function ∇loss(x, ŷ, y_true, μ, μ˜, Q, A, b, S, G, h, T)
+	dₒ, n, n˜ = length(ŷ), length(μ), length(μ˜)
+
+	∂K = [Q                A'                        G';
+		  Diagonal(μ)*A    Diagonal(A*ŷ - b - S*x)   zeros(n,n˜);
+		  Diagonal(μ˜)*G   zeros(n˜,n)               Diagonal(G*ŷ - h - T*x)]
+
+  	∂l = vcat(2*(ŷ-y_true), zeros(length(μ)+length(μ˜)))
+
+	D =  vec(-∂l' * inv(∂K))
+	dz = D[1:dₒ]
+	dμ = D[dₒ+1:dₒ+n]
+
+	∇_Q =  0.5*(dz*ŷ' + ŷ*dz')
+	∇_q =  dz
+	∇_A =  Diagonal(μ)*(dμ*ŷ' + μ*dz')
+	∇_b = -Diagonal(μ)*dμ
+	∇_S = -Diagonal(μ)*dμ*x'
+	return ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S
+end
+
+# perform a gradient descent update on the learnable parameters. Not sure why not updating parameters in place
+function update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
+	Q -= α*reshape(normalize(vec(∇_Q)), size(∇_Q))
+	q -= α*normalize(∇_q)
+	A -= α*reshape(normalize(vec(∇_A)), size(∇_A))
+	b -= α*normalize(∇_b)
+	S -= α*reshape(normalize(vec(∇_S)), size(∇_S))
+	return Q, q, A, b, S
+end
+
+
+# optimize parameters. batch_size=1 is vanilla SGD.
+function Train(X, Y, G, h, T, batch_size, epochs, α)
+	dᵢ, dₒ = length(X[1]), length(Y[1])
+	n = 5
+	U = rand(dₒ, dₒ)
+	Q = U'*U + 0.001*I
+	q = randn(dₒ)
+	A = randn(n, dₒ)
+	b = A*randn(dₒ) + 5*rand(n)
+	S = 0.01randn(n, dᵢ)
+
+	num_batches = Int(ceil(length(X) / batch_size))
+	batches = [i != num_batches ? ((i-1)*batch_size+1:i*batch_size) : ((i-1)*batch_size+1:length(X)) for i in 1:num_batches]
+	loss = zeros(num_batches*epochs)
+	
+	iter = 1
+	for e in 1:epochs
+		# need to shuffle data here. Something like: a = a[shuffle(1:end), :]
+		for batch in batches
+			∇_Q, ∇_q, ∇_A, ∇_b, ∇_S = zeros(size(Q)), zeros(length(q)), zeros(size(A)), zeros(length(b)), zeros(size(S))
+			for i in batch
+				ŷ, μ, μ˜ = solve_QP(X[i], Q, q, A, b, S, G, h, T)
+				∇_Qᵢ, ∇_qᵢ, ∇_Aᵢ, ∇_bᵢ, ∇_Sᵢ = ∇loss(X[i], ŷ, Y[i], μ, μ˜, Q, A, b, S, G, h, T) # should I divide ∇ by length(batch)?
+				∇_Q += ∇_Qᵢ # find shorter way to do this
+				∇_q += ∇_qᵢ
+				∇_A += ∇_Aᵢ
+				∇_b += ∇_bᵢ
+				∇_S += ∇_Sᵢ
+			end
+			Q, q, A, b, S = update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
+			loss[iter] = mse_loss(X, Y, Q, q, A, b, S, G, h, T)
+			println("Iter: ", iter, "    Loss: ", loss[iter])
+			iter += 1
+		end
+	end
+	return Q, q, A, b, S, loss
+end
+
+
+
+
+
+
+### UNUSED FUNCTIONS ###
 # Compute optimal solution to an LP. Returns y_opt, μ_opt, μ˜_opt
 function solve_LP(x, c, A, b, S, G, h, T; presolve=false)
 	model = Model(GLPK.Optimizer)
@@ -21,90 +126,3 @@ function solve_LP(x, c, A, b, S, G, h, T; presolve=false)
 		error("LP error!")
 	end
 end
-
-# computes loss over all data points. Not dividing by num_samples
-function mse_loss(X, Y, c, A, b, S, G, h, T)
-	loss = 0
-	for i in 1:length(X)
-		ŷ, nothing, nothing = solve_LP(X[i], c, A, b, S, G, h, T)
-		loss += norm(ŷ - Y[i])^2
-	end
-	return loss
-end
-
-
-# Compute gradient of loss w.r.t. learnable parameters for one sample
-function ∇loss(x, ŷ, y_true, μ, μ˜, A, b, S, G, h, T)
-	dₒ, n, n˜ = length(ŷ), length(μ), length(μ˜)
-
-	∂K = [zeros(dₒ,dₒ)     A'                        G';
-		  Diagonal(μ)*A    Diagonal(A*ŷ - b - S*x)   zeros(n,n˜);
-		  Diagonal(μ˜)*G   zeros(n˜,n)               Diagonal(G*ŷ - h - T*x)]
-  	∂l = vcat(2*(ŷ-y_true), zeros(length(μ)+length(μ˜)))
-
-	D =  ∂l * inv(∂K)
-	dz = D[1:dₒ]
-	dμ = D[dₒ+1:dₒ+n]
-
-	∇_c = dz
-	∇_A = vec(Diagonal(μ)*(dμ*ŷ' + μ*dz')) # use vec() to flatten and reshape(∇_A, size(A)) to restore to matrix
-	∇_b = -Diagonal(μ)*dμ
-	∇_S = vec(-Diagonal(μ)*dμ*x')
-	return vcat(∇_c, ∇_A, ∇_b, ∇_S)
-end
-
-# perform a gradient descent update on the learnable parameters. Updates parameters in place
-function update_params!(c, A, b, S, α, ∇)
-	dir = normalize(∇)
-	c_range = 1 : length(c)
-	A_range = c_range[end]+1 : c_range[end]+length(A)
-	b_range = A_range[end]+1 : A_range[end]+length(b)
-	S_range = b_range[end]+1 : length(∇)
-
-	c -= α*dir[c_range]
-	A -= α*reshape(dir[A_range], size(A))
-	b -= α*dir[b_range]
-	S -= α*reshape(dir[S_range], size(S))
-	return nothing
-end
-
-
-# optimize parameters. batch_size=1 is vanilla SGD.
-function Train(X, Y, batch_size, epochs, α)
-	dᵢ, dₒ = length(X[1]), length(Y[1])
-	n = 5
-	c = randn(dₒ)
-	A = randn(n, dₒ)
-	b = A*randn(dₒ) + 10*rand(n)
-	# S = randn(n, dᵢ)
-	S = 0.0001*Matrix{Float64}(I, n, dᵢ)
-	G = vcat(Matrix{Float64}(I, dₒ, dₒ), -Matrix{Float64}(I, dₒ, dₒ))
-	h = 5*vcat(ones(dₒ), -ones(dₒ))
-	T = zeros(length(h),dᵢ)
-	num_params = dₒ + n*dₒ + n + n*dᵢ
-	num_batches = Int(ceil(length(X) / batch_size))
-	batches = [i != num_batches ? ((i-1)*batch_size+1:i*batch_size) : ((i-1)*batch_size+1:length(X)) for i in 1:num_batches]
-	loss = zeros(num_batches*epochs)
-	
-	iter = 1
-	for e in 1:epochs
-		# need to shuffle data here. Something like: a = a[shuffle(1:end), :]
-		for batch in batches
-			∇ = zeros(num_params)
-			for i in batch
-				ŷ, μ, μ˜ = solve_LP(X[i], c, A, b, S, G, h, T)
-				∇ += ∇loss(X[i], ŷ, Y[i], μ, μ˜, A, b, S, G, h, T) # should I divide ∇ by length(batch)?
-			end
-			update_params!(c, A, b, S, α, ∇)
-			loss[iter] = mse_loss(X, Y, c, A, b, S, G, h, T)
-			iter += 1
-		end
-	end
-	return c, A, b, S, loss
-end
-
-
-
-
-
-
