@@ -3,12 +3,16 @@ using LinearAlgebra, JuMP, GLPK, Ipopt, Random
 # TODO: Make QP params a struct instead of passing Q, q, A, b, S, G, h, T to everything
 
 # Compute optimal solution to a QP. Returns y_opt, μ_opt, μ˜_opt
-function solve_QP(x, Q, q, A, b, S, G, h, T)
+function solve_QP(x, U, q, A, p, Δ, S, G, h, T)
+	Q = U'*U + 0.001*I
+	Sx = max.(0, S*x)
+	b = A*p + Δ
+
 	model = Model(Ipopt.Optimizer)
 	set_optimizer_attribute(model, "print_level", 0)
 	@variable(model, y[1:length(q)])
 	@objective(model, Min, 0.5*y'*Q*y + q⋅y)
-	@constraint(model, con_μ[i in 1:length(b)],  A[i,:]⋅y <= b[i] + S[i,:]⋅x)
+	@constraint(model, con_μ[i in 1:length(b)],  A[i,:]⋅y <= b[i] + Sx[i])
 	@constraint(model, con_μ˜[i in 1:length(h)], G[i,:]⋅y <= h[i] + T[i,:]⋅x)
 	optimize!(model)
 
@@ -21,21 +25,24 @@ function solve_QP(x, Q, q, A, b, S, G, h, T)
 end
 
 # computes loss over all data points. Not dividing by num_samples
-function mse_loss(X, Y, Q, q, A, b, S, G, h, T)
+function mse_loss(X, Y, U, q, A, p, Δ, S, G, h, T)
 	loss = 0
 	for i in 1:length(X)
-		ŷ, nothing, nothing = solve_QP(X[i], Q, q, A, b, S, G, h, T)
+		ŷ, nothing, nothing = solve_QP(X[i], U, q, A, p, Δ, S, G, h, T)
 		loss += norm(ŷ - Y[i])^2
 	end
 	return loss
 end
 
 # Compute gradient of loss w.r.t. learnable parameters for one sample
-function ∇loss(x, ŷ, y_true, μ, μ˜, Q, A, b, S, G, h, T)
+function ∇loss(x, ŷ, y_true, μ, μ˜, U, A, p, Δ, S, G, h, T)
+	Q = U'*U + 0.001*I
+	Sx = max.(0, S*x)
+	b = A*p + Δ
 	dₒ, n, n˜ = length(ŷ), length(μ), length(μ˜)
 
 	∂K = [Q                A'                        G';
-		  Diagonal(μ)*A    Diagonal(A*ŷ - b - S*x)   zeros(n,n˜);
+		  Diagonal(μ)*A    Diagonal(A*ŷ - b - Sx)   zeros(n,n˜);
 		  Diagonal(μ˜)*G   zeros(n˜,n)               Diagonal(G*ŷ - h - T*x)]
 
   	∂l = vcat(2*(ŷ-y_true), zeros(length(μ)+length(μ˜)))
@@ -48,18 +55,26 @@ function ∇loss(x, ŷ, y_true, μ, μ˜, Q, A, b, S, G, h, T)
 	∇_q =  dz
 	∇_A =  Diagonal(μ)*(dμ*ŷ' + μ*dz')
 	∇_b = -Diagonal(μ)*dμ
-	∇_S = -Diagonal(μ)*dμ*x'
-	return ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S
+	∇_S = -Diagonal(μ)*dμ # *x'
+
+	∇_U = ∇_Q*2*U
+	∇_S = (∇_S .* [Sx[i] > 0 for i in 1:length(Sx)]) * x' # gradient of ReLU
+	∇_p = vec(reshape(∇_b, 1, length(∇_b))*A)
+
+	return ∇_U, ∇_q, ∇_A, ∇_p, ∇_S
 end
 
+safe_normalize(v) = v == zeros(length(v)) ? (return zeros(length(v))) : (return normalize(v))
+
+
 # perform a gradient descent update on the learnable parameters. Not sure why not updating parameters in place
-function update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
-	Q -= α*reshape(normalize(vec(∇_Q)), size(∇_Q))
-	q -= α*normalize(∇_q)
-	A -= α*reshape(normalize(vec(∇_A)), size(∇_A))
-	b -= α*normalize(∇_b)
-	S -= α*reshape(normalize(vec(∇_S)), size(∇_S))
-	return Q, q, A, b, S
+function update_params!(U, q, A, p, S, ∇_U, ∇_q, ∇_A, ∇_p, ∇_S, α)
+	U -= α*reshape(safe_normalize(vec(∇_U)), size(∇_U))
+	q -= α*safe_normalize(∇_q)
+	A -= α*reshape(safe_normalize(vec(∇_A)), size(∇_A))
+	p -= α*safe_normalize(∇_p)
+	S -= α*reshape(safe_normalize(vec(∇_S)), size(∇_S))
+	return U, q, A, p, S
 end
 
 
@@ -71,8 +86,10 @@ function Train(X, Y, G, h, T, batch_size, epochs, α)
 	Q = U'*U + 0.001*I
 	q = randn(dₒ)
 	A = randn(n, dₒ)
-	b = A*randn(dₒ) + 5*rand(n)
-	S = 0.01randn(n, dᵢ)
+	p = randn(dₒ)
+	Δ = 5*rand(n)
+	b = A*p + Δ
+	S = 1000*rand(n, dᵢ)
 
 	num_batches = Int(ceil(length(X) / batch_size))
 	batches = [i != num_batches ? ((i-1)*batch_size+1:i*batch_size) : ((i-1)*batch_size+1:length(X)) for i in 1:num_batches]
@@ -82,24 +99,28 @@ function Train(X, Y, G, h, T, batch_size, epochs, α)
 	for e in 1:epochs
 		# need to shuffle data here. Something like: a = a[shuffle(1:end), :]
 		for batch in batches
-			∇_Q, ∇_q, ∇_A, ∇_b, ∇_S = zeros(size(Q)), zeros(length(q)), zeros(size(A)), zeros(length(b)), zeros(size(S))
+			∇_U, ∇_q, ∇_A, ∇_p, ∇_S = zeros(size(U)), zeros(length(q)), zeros(size(A)), zeros(length(p)), zeros(size(S))
 			for i in batch
-				ŷ, μ, μ˜ = solve_QP(X[i], Q, q, A, b, S, G, h, T)
-				∇_Qᵢ, ∇_qᵢ, ∇_Aᵢ, ∇_bᵢ, ∇_Sᵢ = ∇loss(X[i], ŷ, Y[i], μ, μ˜, Q, A, b, S, G, h, T) # should I divide ∇ by length(batch)?
-				∇_Q += ∇_Qᵢ # find shorter way to do this
+				ŷ, μ, μ˜ = solve_QP(X[i], U, q, A, p, Δ, S, G, h, T)
+				∇_Uᵢ, ∇_qᵢ, ∇_Aᵢ, ∇_pᵢ, ∇_Sᵢ = ∇loss(X[i], ŷ, Y[i], μ, μ˜, U, A, p, Δ, S, G, h, T) # should I divide ∇ by length(batch)?
+				∇_U += ∇_Uᵢ # find shorter way to do this
 				∇_q += ∇_qᵢ
 				∇_A += ∇_Aᵢ
-				∇_b += ∇_bᵢ
+				∇_p += ∇_pᵢ
 				∇_S += ∇_Sᵢ
 			end
-			Q, q, A, b, S = update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
-			loss[iter] = mse_loss(X, Y, Q, q, A, b, S, G, h, T)
+			U, q, A, p, S = update_params!(U, q, A, p, S, ∇_U, ∇_q, ∇_A, ∇_p, ∇_S, α)
+			loss[iter] = mse_loss(X, Y, U, q, A, p, Δ, S, G, h, T)
 			println("Iter: ", iter, "    Loss: ", loss[iter])
 			iter += 1
 		end
 	end
-	return Q, q, A, b, S, loss
+	return U, q, A, p, Δ, S, loss
 end
+
+
+
+
 
 
 
