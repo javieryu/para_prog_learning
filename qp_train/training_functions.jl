@@ -92,6 +92,112 @@ function solve_IPOPT(Q, q, A, b)
 	end
 end
 
+
+
+
+# INCOMPLETE
+function sketch_hessian(Q, A, b, x, sketch_dim)
+	# full = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
+	S = S_count(sketch_dim, length(x))
+	return S'*Diagonal([1/abs.(b[i] - dot(A[i,:], x)) for i in 1:length(b)])*A
+end
+
+function S_count(sketch_dim, n)
+	Ones = [rand(1:n) for i in 1:sketch_dim]
+	S = [Ones[i] == j for i in 1:sketch_dim, j in 1:n] # one nonzero per row to sample rows from root_hess
+end
+
+
+# Solve Chebyshev Center LP
+# "an optimal dual variable is nonzero only if its associated constraint in the primal is binding", http://web.mit.edu/15.053/www/AMP-Chapter-04.pdf
+function cheby_lp(A, b; presolve=false)
+	dim = size(A,2)
+	model = Model(GLPK.Optimizer)
+	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
+	@variable(model, r)
+	@variable(model, x_c[1:dim])
+	@objective(model, Max, r)
+
+	for i in 1:length(b)
+		@constraint(model, dot(A[i,:],x_c) + r*norm(A[i,:]) ≤ b[i])
+	end
+
+	@constraint(model,  r ≤ 1e4) # prevents unboundedness
+	@constraint(model, -r ≤ -1e-15) # Must have r>0
+	optimize!(model)
+
+	if termination_status(model) == MOI.OPTIMAL
+		return value.(x_c)
+	elseif termination_status(model) == MOI.NUMERICAL_ERROR && !presolve
+		return cheby_lp(A, b, presolve=true)
+	else
+		@show termination_status(model)
+		error("Chebyshev center error!")
+	end
+end
+
+
+# add stopping condition
+function newton_sketch(Q, q, A, b, sketch_dim; ρ=1, ϵ=1e-6)
+	x = cheby_lp(A, b; presolve=false)
+
+
+	for i in 1:max_iters
+		while norm(g) > 1e-3
+			# compute direction
+			g = Q*x + q + sum( (1 ./ (b[i]- A[i,:]*x))*A[i,:]  for i in 1:length(b))
+			H = sketch_hessian(Q, A, b, x, sketch_dim)
+			dir = H \ g
+
+			# line search
+			α = α_upper(A, b, x, dir) - ϵ
+			decrement = false
+			y_old = 0.5*x'*Q*x + q⋅x - ρ*sum(log.(b - A*x))
+			while !decrement
+				x = x - α*dir
+				y = 0.5*x'*Q*x + q⋅x - ρ*sum(log.(b - A*x))
+				y < y_old ? decrement = true : nothing
+				α /= 2.
+			end
+		end
+		ρ /= 2.
+	end
+
+end
+
+
+
+function α_upper(A, b, x, dir; presolve=false)
+	dim = size(A,2)
+	model = Model(GLPK.Optimizer)
+	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
+	@variable(model, α)
+	@objective(model, Max, α)
+	@constraint(A*(x + α*dir) .≤ b)
+	optimize!(model)
+
+	if termination_status(model) == MOI.OPTIMAL
+		return value(α)
+	elseif termination_status(model) == MOI.NUMERICAL_ERROR && !presolve
+		return α_upper(A, b, x ,dir, presolve=true)
+	else
+		@show termination_status(model)
+		error("Line Search Error")
+	end
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
 # computes loss over all data points. Not dividing by num_samples
 function mse_loss(X, Y, Q, q, A, b, S, G, h, T)
 	loss = 0

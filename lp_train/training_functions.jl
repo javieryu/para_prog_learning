@@ -90,6 +90,7 @@ function Train(X, Y, G, h, T, batch_size, epochs, α)
 	Δ = 5*rand(n)
 	b = A*p + Δ
 	S = 1000*rand(n, dᵢ)
+	
 
 	num_batches = Int(ceil(length(X) / batch_size))
 	batches = [i != num_batches ? ((i-1)*batch_size+1:i*batch_size) : ((i-1)*batch_size+1:length(X)) for i in 1:num_batches]
