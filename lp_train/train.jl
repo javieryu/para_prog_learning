@@ -18,12 +18,12 @@ G = vcat(Matrix{Float64}(I, dₒ, dₒ), -Matrix{Float64}(I, dₒ, dₒ))
 h = 1*vcat(ones(dₒ), ones(dₒ))
 T = zeros(length(h),dᵢ)
 
-Q, q, A, b, S, loss = Train(X, Y, G, h, T, batch_size, epochs, α)
+U, q, A, p, Δ, S, loss = Train(X, Y, G, h, T, batch_size, epochs, α)
 
 # add plot
 Ŷ = [zeros(dₒ) for i in 1:length(X)]
 for i in 1:length(X)
-	Ŷ[i], nothing, nothing = solve_QP(X[i], Q, q, A, b, S, G, h, T)
+	Ŷ[i], nothing, nothing = solve_QP(X[i], U, q, A, p, Δ, S, G, h, T)
 end
 
 plt = scatter(vcat(X...), vcat(Ŷ...), label="pQP")
