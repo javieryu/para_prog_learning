@@ -1,4 +1,4 @@
-using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO, ProfileView
+using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO#, ProfileView
 
 function test_OSQP()
 	n = 100
@@ -72,8 +72,6 @@ function solve_IPOPT(Q, q, A, b)
 	end
 end
 
-
-
 function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::Vector{Float64}, x::Vector{Float64}, sketch_dim::Int64)
 	Ones = [rand(1:n) for i in 1:sketch_dim]
 	H_sketch = Diagonal(1 ./ abs.(r[Ones]))*A[Ones, :]
@@ -133,15 +131,21 @@ function newton_sketch(Q, q, A, b, sketch_dim; β=2.0, tol=1e-3, μ=10)
 	#x = get_feasible_start(A, b)
 	#rc = 1e2
 	m = length(b)
-	t = 1. 
+	t = 1.
 	
+	x_old = x # Clean up after debugging
 	while true 
+		println("----------------- Inner Iterations --------------------")
 		x = newton_subproblem(x, Q, q, A, b, t, rc, β)
 		if m / t < tol # if t=m/tol then y_opt is within tol of the true solution 
 			break
 		end
+		println("x norm diff: ", norm(x_old - x))# Clean up after debugging
+		x_old = x# Clean up after debugging
 		t *= μ
 	end
+	
+	println("--------------------- Done Ours ------------------------------")
 	λ = [-1 / t*(A[i,:]⋅x - b[i]) for i in 1:length(b)]
 	return x, λ
 end
@@ -160,13 +164,13 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 	terminate = false
 	i = 1
 	x_old, y, r = similar(x), 0.0, similar(b)
-	while !terminate
+	while true
 		r = b - A*x
 
 		# compute direction
 		∇ = t*Q*x + t*q + 1 ./ A'*r
 		#H = sketch_hessian(Q, t, A, r, x, sketch_dim)
-		H = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
+		H = t*Q + A'*Diagonal([1/(r[i])^2 for i in 1:length(b)])*A
 		dir = -normalize(vec(H \ ∇))
 
 		# line search
@@ -185,16 +189,24 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 		y_old = eval(Q, q, r, t, x_old)
 		while true
 			x_temp = x + α*dir
-			y = eval(Q, q, b - A*x_temp, t, x_old)
+			y = eval(Q, q, vec(b - A*x_temp), t, x_temp)
 			if y ≤ y_old
 				x = x_temp
 				break
 			end
 			α /= β
 		end
+
+		# This condition also holds when the search dir is wrong.
 		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-6, ϵᵣ=1e-6, ϵ_g=1e-6, max_iters=40)
+
+		if terminate
+			println("Last α: ", α)
+			break
+		end
 		i += 1
 	end
+	println("Exited after ", i, " iterations")
 	return x
 end
 
@@ -205,14 +217,18 @@ eval(Q, q, r, t, x) = t*0.5*x⋅(Q*x) + t*q⋅x - sum(log.(r))
 # Absolute improvement, relative improvement, gradient magnitude, max iters
 function Terminate(x_old, y_old, x_new, y_new, ∇, i; ϵₐ=1e-4, ϵᵣ=1e-4, ϵ_g=1e-4, max_iters=100)
 	if abs(y_old - y_new) < ϵₐ
-		println("Abs Error")
+		@show y_old
+		@show y_new
+		println("Abs Error: ", abs(y_old - y_new))
 		return true
 	elseif abs((y_old - y_new)/ y_old) < ϵᵣ
+		@show y_old
+		@show y_new
 		println("Rel Error")
 		return true
-	elseif norm(∇) < ϵ_g
-		println("Grad Mag")
-		return true
+#	elseif norm(∇) < ϵ_g
+#		println("Grad Mag")
+#		return true
 	elseif i ≥ max_iters
 		println("Max iters")
 		return true
@@ -263,7 +279,7 @@ end
 
 
 n = 10
-nc = 100
+nc = 2000
 sketch_dim = 200
 A = randn(nc, n)
 z = randn(n, 1)
@@ -273,15 +289,13 @@ R = randn(n, n)
 Q = R' * R + 0.01 * I
 q = 1000.0 * randn(n)
 
-
+@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-1, μ=10)
 @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
-@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-8, μ=10)
 
 y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
 y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
 
 println("Ipopt Cost: ", y_ipopt)
 println("Our Cost: ", y_ours)
-
 
 #@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
