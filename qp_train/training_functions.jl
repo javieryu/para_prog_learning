@@ -75,9 +75,9 @@ end
 
 
 function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::Vector{Float64}, x::Vector{Float64}, sketch_dim::Int64)
-	H_sqrt = Diagonal(r)*A
-	S = S_count(sketch_dim, length(r))
-	H_sketch = S*H_sqrt
+	Ones = [rand(1:n) for i in 1:sketch_dim]
+	H_sketch = Diagonal(1 ./ abs.(r[Ones]))*A[Ones, :]
+	#S = S_count(sketch_dim, length(r))
 	return t*Q + H_sketch'*H_sketch
 end
 
@@ -85,14 +85,11 @@ function S_count(sketch_dim, n)
 	return S = [rand(1:n) == j for i in 1:sketch_dim, j in 1:n] # one nonzero per row to sample rows from root_hess
 end
 
-
 # Solve Chebyshev Center LP
-function cheby_lp(A, b; presolve=false)
-	dim = size(A,2)
+function cheby_lp(A, b)
 	model = Model(GLPK.Optimizer)
-	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
 	@variable(model, 0 ≤ r ≤ 1e2)
-	@variable(model, x_c[1:dim])
+	@variable(model, x_c[1:size(A, 2)])
 	@objective(model, Max, r)
 
 	for i in 1:length(b)
@@ -102,24 +99,44 @@ function cheby_lp(A, b; presolve=false)
 	optimize!(model)
 
 	if termination_status(model) == MOI.OPTIMAL
-		return value.(x_c)
-	elseif termination_status(model) == MOI.NUMERICAL_ERROR && !presolve
-		return cheby_lp(A, b, presolve=true)
+		return value.(x_c), value.(r)
 	else
 		@show termination_status(model)
 		error("Chebyshev center error!")
 	end
 end
 
+function get_feasible_start(A, b)
+	model = Model(GLPK.Optimizer)
+	@variable(model, -0.1 ≤ s)
+	@variable(model, x[1:size(A, 2)])
+	@objective(model, Min, s)
+	@constraint(model, A * x - b .≤ s)
+
+	optimize!(model)
+
+	if termination_status(model) == MOI.OPTIMAL
+		if value(s) ≤ 0.0
+			return value.(x)
+		else
+			error("Couldn't find a starting location")
+		end
+	else
+		@show termination_status(model)
+		error("Could not find a feasible start error!")
+	end
+end
 
 # 3<μ100 act roughly the same according to cvx book
-function newton_sketch(Q, q, A, b, sketch_dim; tol=1e-3, μ=10)
-	x = cheby_lp(A, b)
+function newton_sketch(Q, q, A, b, sketch_dim; β=2.0, tol=1e-3, μ=10)
+	x, rc = cheby_lp(A, b)
+	#x = get_feasible_start(A, b)
+	#rc = 1e2
 	m = length(b)
 	t = 1. 
 	
 	while true 
-		x = newton_subproblem(x, Q, q, A, b, t)
+		x = newton_subproblem(x, Q, q, A, b, t, rc, β)
 		if m / t < tol # if t=m/tol then y_opt is within tol of the true solution 
 			break
 		end
@@ -129,22 +146,41 @@ function newton_sketch(Q, q, A, b, sketch_dim; tol=1e-3, μ=10)
 	return x, λ
 end
 
+function is_feasible(A::Matrix{Float64}, b::Vector{Float64}, x::Vector{Float64})
+	for i = 1:size(A, 1)
+		if dot(A[i, :], x) - b[i] ≥ 0.0
+			return false
+		end
+	end
+	return true
+end
+
 # minimize t*x'Qx + t*q'x + log_barrier
-function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64; ϵ=1e-6)
+function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64, rc::Float64, β::Float64; ϵ=1e-6)
 	terminate = false
 	i = 1
-	x_old, y = similar(x), 0.0
+	x_old, y, r = similar(x), 0.0, similar(b)
 	while !terminate
 		r = b - A*x
 
 		# compute direction
 		∇ = t*Q*x + t*q + 1 ./ A'*r
-		H = sketch_hessian(Q, t, A, r, x, sketch_dim)
-		# H = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
+		#H = sketch_hessian(Q, t, A, r, x, sketch_dim)
+		H = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
 		dir = -normalize(vec(H \ ∇))
 
 		# line search
-		α = α_upper(A, b, x, dir) - ϵ
+		#α = α_upper(A, b, x, dir) - ϵ
+		α = 2.0 * rc
+		while true
+			x_temp = x + α * dir
+			if is_feasible(A, b, x_temp)
+				break 
+			end
+			
+			α /= β
+		end
+
 		x_old = x
 		y_old = eval(Q, q, r, t, x_old)
 		while true
@@ -154,9 +190,9 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 				x = x_temp
 				break
 			end
-			α /= 2.
+			α /= β
 		end
-		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-4, ϵᵣ=1e-4, ϵ_g=1e-4, max_iters=20)
+		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-6, ϵᵣ=1e-6, ϵ_g=1e-6, max_iters=40)
 		i += 1
 	end
 	return x
@@ -227,25 +263,25 @@ end
 
 
 n = 10
-nc = 1000
-sketch_dim = 100
-# A = randn(nc, n)
-# z = randn(n, 1)
-# b = A * z + rand(nc, 1)
+nc = 100
+sketch_dim = 200
+A = randn(nc, n)
+z = randn(n, 1)
+b = vec(A * z + rand(nc))
 
-# R = randn(n, n)
-# Q = R' * R + 0.01 * I
-# q = 1000.0 * randn(n, 1)
-
-
-# @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
-# @time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
-
-# y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
-# y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
-
-# println("Ipopt Cost: ", y_ipopt)
-# println("Our Cost: ", y_ours)
+R = randn(n, n)
+Q = R' * R + 0.01 * I
+q = 1000.0 * randn(n)
 
 
-@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
+@time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
+@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-8, μ=10)
+
+y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
+y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
+
+println("Ipopt Cost: ", y_ipopt)
+println("Our Cost: ", y_ours)
+
+
+#@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
