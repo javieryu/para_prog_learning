@@ -1,24 +1,4 @@
-using LinearAlgebra, JuMP, GLPK, Ipopt, Random, OSQP, COSMO
-
-# TODO: Make QP params a struct instead of passing Q, q, A, b, S, G, h, T to everything
-
-# Compute optimal solution to a QP. Returns y_opt, μ_opt, μ˜_opt
-function solve_QP(x, Q, q, A, b, S, G, h, T)
-	model = Model(Ipopt.Optimizer)
-	set_optimizer_attribute(model, "print_level", 0)
-	@variable(model, y[1:length(q)])
-	@objective(model, Min, 0.5*y'*Q*y + q⋅y)
-	@constraint(model, con_μ[i in 1:length(b)],  A[i,:]⋅y <= b[i] + S[i,:]⋅x)
-	@constraint(model, con_μ˜[i in 1:length(h)], G[i,:]⋅y <= h[i] + T[i,:]⋅x)
-	optimize!(model)
-
-	if termination_status(model) == MOI.LOCALLY_SOLVED # I don't like how JuMP doesn't recognize this as being a global solution
-		return value.(y), dual.(con_μ), dual.(con_μ˜)
-	else
-		@show termination_status(model)
-		error("QP error!")
-	end
-end
+using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO, ProfileView
 
 function test_OSQP()
 	n = 100
@@ -58,34 +38,34 @@ function solve_COSMO(Q, q, A, b)
 	end
 end
 
-function solve_OSQP(Q, q, A, b)
-	model = Model(OSQP.Optimizer)
-	set_optimizer_attribute(model, "verbose", 0)
-	set_optimizer_attribute(model, "eps_prim_inf", 1e-6)
-	set_optimizer_attribute(model, "adaptive_rho", 0)
-	@variable(model, y[1:length(q)])
-	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
-	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
-	optimize!(model)
+# function solve_OSQP(Q, q, A, b)
+# 	model = Model(OSQP.Optimizer)
+# 	set_optimizer_attribute(model, "verbose", 0)
+# 	set_optimizer_attribute(model, "eps_prim_inf", 1e-6)
+# 	set_optimizer_attribute(model, "adaptive_rho", 0)
+# 	@variable(model, y[1:length(q)])
+# 	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
+# 	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
+# 	optimize!(model)
 
-	if termination_status(model) == MOI.OPTIMAL # I don't like how JuMP doesn't recognize this as being a global solution
-		return value.(y), dual.(con_μ)
-	else
-		@show termination_status(model)
-		error("QP error!")
-	end
-end
+# 	if termination_status(model) == MOI.OPTIMAL # I don't like how JuMP doesn't recognize this as being a global solution
+# 		return value.(y), dual.(con_μ)
+# 	else
+# 		@show termination_status(model)
+# 		error("QP error!")
+# 	end
+# end
 
 function solve_IPOPT(Q, q, A, b)
 	model = Model(Ipopt.Optimizer)
 	set_optimizer_attribute(model, "print_level", 0)
-	@variable(model, y[1:length(q)])
-	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
-	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
+	@variable(model, x[1:length(q)])
+	@objective(model, Min, 0.5 * x' * Q * x + dot(q, x))
+	@constraint(model, con_λ[i in 1:length(b)],  dot(A[i,:], x) <= b[i])
 	optimize!(model)
 
-	if termination_status(model) == MOI.LOCALLY_SOLVED # I don't like how JuMP doesn't recognize this as being a global solution
-		return value.(y), dual.(con_μ)
+	if termination_status(model) == MOI.LOCALLY_SOLVED
+		return value.(x), dual.(con_λ)
 	else
 		@show termination_status(model)
 		error("QP error!")
@@ -94,27 +74,24 @@ end
 
 
 
-
-# INCOMPLETE
-function sketch_hessian(Q, A, b, x, sketch_dim)
-	# full = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
-	S = S_count(sketch_dim, length(x))
-	return S'*Diagonal([1/abs.(b[i] - dot(A[i,:], x)) for i in 1:length(b)])*A
+function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::Vector{Float64}, x::Vector{Float64}, sketch_dim::Int64)
+	H_sqrt = Diagonal(r)*A
+	S = S_count(sketch_dim, length(r))
+	H_sketch = S*H_sqrt
+	return t*Q + H_sketch'*H_sketch
 end
 
 function S_count(sketch_dim, n)
-	Ones = [rand(1:n) for i in 1:sketch_dim]
-	S = [Ones[i] == j for i in 1:sketch_dim, j in 1:n] # one nonzero per row to sample rows from root_hess
+	return S = [rand(1:n) == j for i in 1:sketch_dim, j in 1:n] # one nonzero per row to sample rows from root_hess
 end
 
 
 # Solve Chebyshev Center LP
-# "an optimal dual variable is nonzero only if its associated constraint in the primal is binding", http://web.mit.edu/15.053/www/AMP-Chapter-04.pdf
 function cheby_lp(A, b; presolve=false)
 	dim = size(A,2)
 	model = Model(GLPK.Optimizer)
 	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
-	@variable(model, r)
+	@variable(model, 0 ≤ r ≤ 1e2)
 	@variable(model, x_c[1:dim])
 	@objective(model, Max, r)
 
@@ -122,8 +99,6 @@ function cheby_lp(A, b; presolve=false)
 		@constraint(model, dot(A[i,:],x_c) + r*norm(A[i,:]) ≤ b[i])
 	end
 
-	@constraint(model,  r ≤ 1e4) # prevents unboundedness
-	@constraint(model, -r ≤ -1e-15) # Must have r>0
 	optimize!(model)
 
 	if termination_status(model) == MOI.OPTIMAL
@@ -137,49 +112,88 @@ function cheby_lp(A, b; presolve=false)
 end
 
 
-# add stopping condition
-function newton_sketch(Q, q, A, b, sketch_dim; ρ=1, ϵ=1e-6)
-	x = cheby_lp(A, b; presolve=false)
-
-
-	for i in 1:max_iters
-		while norm(g) > 1e-3
-			# compute direction
-			g = Q*x + q + sum( (1 ./ (b[i]- A[i,:]*x))*A[i,:]  for i in 1:length(b))
-			H = sketch_hessian(Q, A, b, x, sketch_dim)
-			dir = H \ g
-
-			# line search
-			α = α_upper(A, b, x, dir) - ϵ
-			decrement = false
-			y_old = 0.5*x'*Q*x + q⋅x - ρ*sum(log.(b - A*x))
-			while !decrement
-				x = x - α*dir
-				y = 0.5*x'*Q*x + q⋅x - ρ*sum(log.(b - A*x))
-				y < y_old ? decrement = true : nothing
-				α /= 2.
-			end
+# 3<μ100 act roughly the same according to cvx book
+function newton_sketch(Q, q, A, b, sketch_dim; tol=1e-3, μ=10)
+	x = cheby_lp(A, b)
+	m = length(b)
+	t = 1. 
+	
+	while true 
+		x = newton_subproblem(x, Q, q, A, b, t)
+		if m / t < tol # if t=m/tol then y_opt is within tol of the true solution 
+			break
 		end
-		ρ /= 2.
+		t *= μ
 	end
-
+	λ = [-1 / t*(A[i,:]⋅x - b[i]) for i in 1:length(b)]
+	return x, λ
 end
 
+# minimize t*x'Qx + t*q'x + log_barrier
+function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64; ϵ=1e-6)
+	terminate = false
+	i = 1
+	x_old, y = similar(x), 0.0
+	while !terminate
+		r = b - A*x
+
+		# compute direction
+		∇ = t*Q*x + t*q + 1 ./ A'*r
+		H = sketch_hessian(Q, t, A, r, x, sketch_dim)
+		# H = Q + A'*Diagonal([1/(b[i] - dot(A[i,:], x))^2 for i in 1:length(b)])*A
+		dir = -normalize(vec(H \ ∇))
+
+		# line search
+		α = α_upper(A, b, x, dir) - ϵ
+		x_old = x
+		y_old = eval(Q, q, r, t, x_old)
+		while true
+			x_temp = x + α*dir
+			y = eval(Q, q, b - A*x_temp, t, x_old)
+			if y ≤ y_old
+				x = x_temp
+				break
+			end
+			α /= 2.
+		end
+		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-4, ϵᵣ=1e-4, ϵ_g=1e-4, max_iters=20)
+		i += 1
+	end
+	return x
+end
+
+eval(Q, q, r, t, x) = t*0.5*x⋅(Q*x) + t*q⋅x - sum(log.(r))
 
 
-function α_upper(A, b, x, dir; presolve=false)
-	dim = size(A,2)
+# input current and past iterate & cost and return whether to terminate or continue.
+# Absolute improvement, relative improvement, gradient magnitude, max iters
+function Terminate(x_old, y_old, x_new, y_new, ∇, i; ϵₐ=1e-4, ϵᵣ=1e-4, ϵ_g=1e-4, max_iters=100)
+	if abs(y_old - y_new) < ϵₐ
+		println("Abs Error")
+		return true
+	elseif abs((y_old - y_new)/ y_old) < ϵᵣ
+		println("Rel Error")
+		return true
+	elseif norm(∇) < ϵ_g
+		println("Grad Mag")
+		return true
+	elseif i ≥ max_iters
+		println("Max iters")
+		return true
+	end
+	return false
+end
+
+# Find maximum feasible step size
+function α_upper(A::Matrix{Float64}, b::Vector{Float64}, x::Vector{Float64}, dir::Vector{Float64}; presolve=false)
 	model = Model(GLPK.Optimizer)
-	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
-	@variable(model, α)
+	@variable(model, 0. ≤ α ≤ 1e3)
 	@objective(model, Max, α)
-	@constraint(A*(x + α*dir) .≤ b)
+	@constraint(model, α*A*dir .≤ b - A*x)
 	optimize!(model)
 
 	if termination_status(model) == MOI.OPTIMAL
 		return value(α)
-	elseif termination_status(model) == MOI.NUMERICAL_ERROR && !presolve
-		return α_upper(A, b, x ,dir, presolve=true)
 	else
 		@show termination_status(model)
 		error("Line Search Error")
@@ -189,118 +203,49 @@ end
 
 
 
-
-
-
-
-
-
-
-
-
-# computes loss over all data points. Not dividing by num_samples
-function mse_loss(X, Y, Q, q, A, b, S, G, h, T)
-	loss = 0
-	for i in 1:length(X)
-		ŷ, nothing, nothing = solve_QP(X[i], Q, q, A, b, S, G, h, T)
-		loss += norm(ŷ - Y[i])^2
-	end
-	return loss
-end
-
 # Compute gradient of loss w.r.t. learnable parameters for one sample
-function ∇loss(x, ŷ, y_true, μ, μ˜, Q, A, b, S, G, h, T)
-	dₒ, n, n˜ = length(ŷ), length(μ), length(μ˜)
+function ∇loss(x, ŷ, y_true, λ, λ˜, Q, A, b, S, G, h, T)
+	dₒ, n, n˜ = length(ŷ), length(λ), length(λ˜)
 
 	∂K = [Q                A'                        G';
-		  Diagonal(μ)*A    Diagonal(A*ŷ - b - S*x)   zeros(n,n˜);
-		  Diagonal(μ˜)*G   zeros(n˜,n)               Diagonal(G*ŷ - h - T*x)]
+		  Diagonal(λ)*A    Diagonal(A*ŷ - b - S*x)   zeros(n,n˜);
+		  Diagonal(λ˜)*G   zeros(n˜,n)               Diagonal(G*ŷ - h - T*x)]
 
-  	∂l = vcat(2*(ŷ-y_true), zeros(length(μ)+length(μ˜)))
+  	∂l = vcat(2*(ŷ-y_true), zeros(length(λ)+length(λ˜)))
 
 	D =  vec(-∂l' * inv(∂K))
 	dz = D[1:dₒ]
-	dμ = D[dₒ+1:dₒ+n]
+	dλ = D[dₒ+1:dₒ+n]
 
 	∇_Q =  0.5*(dz*ŷ' + ŷ*dz')
 	∇_q =  dz
-	∇_A =  Diagonal(μ)*(dμ*ŷ' + μ*dz')
-	∇_b = -Diagonal(μ)*dμ
-	∇_S = -Diagonal(μ)*dμ*x'
+	∇_A =  Diagonal(λ)*(dλ*ŷ' + λ*dz')
+	∇_b = -Diagonal(λ)*dλ
+	∇_S = -Diagonal(λ)*dλ*x'
 	return ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S
 end
 
-# perform a gradient descent update on the learnable parameters. Not sure why not updating parameters in place
-function update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
-	Q -= α*reshape(normalize(vec(∇_Q)), size(∇_Q))
-	q -= α*normalize(∇_q)
-	A -= α*reshape(normalize(vec(∇_A)), size(∇_A))
-	b -= α*normalize(∇_b)
-	S -= α*reshape(normalize(vec(∇_S)), size(∇_S))
-	return Q, q, A, b, S
-end
+
+n = 10
+nc = 1000
+sketch_dim = 100
+# A = randn(nc, n)
+# z = randn(n, 1)
+# b = A * z + rand(nc, 1)
+
+# R = randn(n, n)
+# Q = R' * R + 0.01 * I
+# q = 1000.0 * randn(n, 1)
 
 
-# optimize parameters. batch_size=1 is vanilla SGD.
-function Train(X, Y, G, h, T, batch_size, epochs, α)
-	dᵢ, dₒ = length(X[1]), length(Y[1])
-	n = 5
-	U = rand(dₒ, dₒ)
-	Q = U'*U + 0.001*I
-	q = randn(dₒ)
-	A = randn(n, dₒ)
-	b = A*randn(dₒ) + 5*rand(n)
-	S = 0.01randn(n, dᵢ)
+# @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
+# @time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
 
-	num_batches = Int(ceil(length(X) / batch_size))
-	batches = [i != num_batches ? ((i-1)*batch_size+1:i*batch_size) : ((i-1)*batch_size+1:length(X)) for i in 1:num_batches]
-	loss = zeros(num_batches*epochs)
-	
-	iter = 1
-	for e in 1:epochs
-		# need to shuffle data here. Something like: a = a[shuffle(1:end), :]
-		for batch in batches
-			∇_Q, ∇_q, ∇_A, ∇_b, ∇_S = zeros(size(Q)), zeros(length(q)), zeros(size(A)), zeros(length(b)), zeros(size(S))
-			for i in batch
-				ŷ, μ, μ˜ = solve_QP(X[i], Q, q, A, b, S, G, h, T)
-				∇_Qᵢ, ∇_qᵢ, ∇_Aᵢ, ∇_bᵢ, ∇_Sᵢ = ∇loss(X[i], ŷ, Y[i], μ, μ˜, Q, A, b, S, G, h, T) # should I divide ∇ by length(batch)?
-				∇_Q += ∇_Qᵢ # find shorter way to do this
-				∇_q += ∇_qᵢ
-				∇_A += ∇_Aᵢ
-				∇_b += ∇_bᵢ
-				∇_S += ∇_Sᵢ
-			end
-			Q, q, A, b, S = update_params!(Q, q, A, b, S, ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S, α)
-			loss[iter] = mse_loss(X, Y, Q, q, A, b, S, G, h, T)
-			println("Iter: ", iter, "    Loss: ", loss[iter])
-			iter += 1
-		end
-	end
-	return Q, q, A, b, S, loss
-end
+# y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
+# y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
+
+# println("Ipopt Cost: ", y_ipopt)
+# println("Our Cost: ", y_ours)
 
 
-
-
-
-
-### UNUSED FUNCTIONS ###
-# Compute optimal solution to an LP. Returns y_opt, μ_opt, μ˜_opt
-function solve_LP(x, c, A, b, S, G, h, T; presolve=false)
-	model = Model(GLPK.Optimizer)
-	presolve ? set_optimizer_attribute(model, "presolve", 1) : nothing
-	@variable(model, y[1:length(c)])
-	@objective(model, Min, c⋅y)
-	@constraint(model, con_μ[i in 1:length(b)],  A[i,:]⋅y <= b[i] + S[i,:]⋅x)
-	@constraint(model, con_μ˜[i in 1:length(h)], G[i,:]⋅y <= h[i] + T[i,:]⋅x)
-	optimize!(model)
-
-	if termination_status(model) == MOI.OPTIMAL
-		return value.(y), dual.(con_μ), dual.(con_μ˜)
-	elseif termination_status(model) == MOI.NUMERICAL_ERROR && !presolve
-		return solve_LP(x, c, A, b, G, h, S, T; presolve=true)
-	else
-		@show termination_status(model)
-		error("LP error!")
-	end
-end
+@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
