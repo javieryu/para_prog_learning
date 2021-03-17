@@ -120,17 +120,17 @@ function newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc; β=2.0, tol=
 	
 	x_old = x # Clean up after debugging
 	while true 
-		println("----------------- Inner Iterations --------------------")
-		x = newton_subproblem(x, Q, q, A, b, t, rc, β, ps, sketch_type)
+		# println("----------------- Inner Iterations --------------------")
+		x = newton_subproblem(x, Q, q, A, b, t, rc, β, ps, sketch_type, sketch_dim)
 		if m / t < tol # if t=m/tol then y_opt is within tol of the true solution 
 			break
 		end
-		println("x norm diff: ", norm(x_old - x))# Clean up after debugging
+		# println("x norm diff: ", norm(x_old - x))# Clean up after debugging
 		x_old = x# Clean up after debugging
 		t *= μ
 	end
 	
-	println("--------------------- Done Ours ------------------------------")
+	# println("--------------------- Done Ours ------------------------------")
 	λ = [-1 / t*(A[i,:]⋅x - b[i]) for i in 1:length(b)]
 	return x, λ
 end
@@ -145,7 +145,7 @@ function is_feasible(A::Matrix{Float64}, b::Vector{Float64}, x::Vector{Float64})
 end
 
 # minimize t*x'Qx + t*q'x + log_barrier
-function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64, rc::Float64, β::Float64, ps::Vector{Float64}, sketch_type; ϵ=1e-6)
+function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64, rc::Float64, β::Float64, ps::Vector{Float64}, sketch_type, sketch_dim; ϵ=1e-6)
 	terminate = false
 	i = 1
 	x_old, y, r = similar(x), 0.0, similar(b)
@@ -189,12 +189,12 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-7, ϵᵣ=1e-7, ϵ_g=1e-6, max_iters=80)
 
 		if terminate
-			println("Last α: ", α)
+			# println("Last α: ", α)
 			break
 		end
 		i += 1
 	end
-	println("Exited after ", i, " iterations")
+	# println("Exited after ", i, " iterations")
 	return x
 end
 
@@ -205,20 +205,20 @@ eval(Q, q, r, t, x) = t*0.5*x⋅(Q*x) + t*q⋅x - sum(log.(r))
 # Absolute improvement, relative improvement, gradient magnitude, max iters
 function Terminate(x_old, y_old, x_new, y_new, ∇, i; ϵₐ=1e-4, ϵᵣ=1e-4, ϵ_g=1e-4, max_iters=100)
 	if abs(y_old - y_new) < ϵₐ
-		@show y_old
-		@show y_new
-		println("Abs Error: ", abs(y_old - y_new))
+		# @show y_old
+		# @show y_new
+		# println("Abs Error: ", abs(y_old - y_new))
 		return true
 	elseif abs((y_old - y_new)/ y_old) < ϵᵣ
-		@show y_old
-		@show y_new
-		println("Rel Error")
+		# @show y_old
+		# @show y_new
+		# println("Rel Error")
 		return true
 #	elseif norm(∇) < ϵ_g
 #		println("Grad Mag")
 #		return true
 	elseif i ≥ max_iters
-		println("Max iters")
+		# println("Max iters")
 		return true
 	end
 	return false
@@ -263,6 +263,16 @@ function ∇loss(x, ŷ, y_true, λ, λ˜, Q, A, b, S, G, h, T)
 	∇_b = -Diagonal(λ)*dλ
 	∇_S = -Diagonal(λ)*dλ*x'
 	return ∇_Q, ∇_q, ∇_A, ∇_b, ∇_S
+end
+
+
+# Compute gradient of loss w.r.t. learnable parameters for one sample
+function ∇loss2(ŷ, λ_, y, λ, Q, A, b)
+	∂K_ = [Q                A';
+		  Diagonal(λ_)*A    Diagonal(A*ŷ - b)]
+	∂K = [Q                A';
+		  Diagonal(λ)*A    Diagonal(A*y - b)]  
+	return norm(∂K_ - ∂K)
 end
 
 
