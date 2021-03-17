@@ -1,6 +1,5 @@
 using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO, StatsBase#, ProfileView
 
-
 function solve_COSMO(Q, q, A, b)
 	model = Model(COSMO.Optimizer)
 	set_optimizer_attribute(model, "max_iter", 10000)
@@ -267,33 +266,34 @@ function ∇loss(x, ŷ, y_true, λ, λ˜, Q, A, b, S, G, h, T)
 end
 
 
-n = 200
-nc = 4000
-sketch_dim = 400
-sketch_type = :Row_Norm # :Uniform, :Row_Norm, :Full
-A = randn(nc, n)
-z = randn(n, 1)
-b = vec(A * z + rand(nc))
-
-R = randn(n, n)
-Q = R' * R + 0.01 * I
-q = randn(n)
-
-@time x0, rc = cheby_lp(A, b, ones(length(b)), :Uniform)
-
-@time x_ours_not, λ_ours_not = newton_sketch(Q, q, A, b, sketch_dim, :Full, x0, rc, tol=1e-4, μ=10)
-@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc, tol=1e-4, μ=10)
-# @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
-@time x_cosmo, λ_cosmo = solve_COSMO2(Q, q, A, b, x0)
-
-y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
-y_ours_not = 0.5*x_ours_not⋅(Q*x_ours_not) + q⋅x_ours_not
-# y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
-y_cosmo = 0.5*x_cosmo⋅(Q*x_cosmo) + q⋅x_cosmo
-
-println("Our Cost: ", y_ours)
-println("Our Unsketched Cost: ", y_ours_not)
-# println("Ipopt Cost: ", y_ipopt)
-println("Cosmo Cost: ", y_cosmo)
-
-#@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
+#n = 200
+#nc = 4000
+#sketch_dim = 400
+#sketch_type = :Row_Norm # :Uniform, :Row_Norm, :Full
+#A = randn(nc, n)
+#z = randn(n, 1)
+#b = vec(A * z + rand(nc))
+#
+#R = randn(n, n)
+#Q = R' * R + 0.01 * I
+##q = randn(n)
+#q = zeros(n)
+#
+#@time x0, rc = cheby_lp(A, b, ones(length(b)), :Uniform)
+#
+#@time x_ours_not, λ_ours_not = newton_sketch(Q, q, A, b, sketch_dim, :Full, x0, rc, tol=1e-4, μ=10)
+#@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc, tol=1e-4, μ=10)
+## @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
+#@time x_cosmo, λ_cosmo = solve_COSMO2(Q, q, A, b, x0)
+#
+#y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
+#y_ours_not = 0.5*x_ours_not⋅(Q*x_ours_not) + q⋅x_ours_not
+## y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
+#y_cosmo = 0.5*x_cosmo⋅(Q*x_cosmo) + q⋅x_cosmo
+#
+#println("Our Cost: ", y_ours)
+#println("Our Unsketched Cost: ", y_ours_not)
+## println("Ipopt Cost: ", y_ipopt)
+#println("Cosmo Cost: ", y_cosmo)
+#
+##@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
