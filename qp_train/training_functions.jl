@@ -4,19 +4,28 @@ using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO, StatsBase#, ProfileView
 function solve_COSMO(Q, q, A, b)
 	model = Model(COSMO.Optimizer)
 	set_optimizer_attribute(model, "max_iter", 10000)
-	set_optimizer_attribute(model, "eps_abs", 1e-1)
-	set_optimizer_attribute(model, "verbose", false)
+	set_optimizer_attribute(model, "eps_abs", 1e-2)
+	set_optimizer_attribute(model, "verbose", true)
 	@variable(model, y[1:length(q)])
 	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
 	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
 	optimize!(model)
-
 	if termination_status(model) == MOI.OPTIMAL
 		return value.(y), dual.(con_μ)
 	else
 		@show termination_status(model)
 		error("QP error!")
 	end
+end
+
+function solve_COSMO2(Q, q, A, b, x0)
+	settings = COSMO.Settings(eps_abs=1e-2)
+	model = COSMO.Model()
+	cn = COSMO.Constraint(-A, b, COSMO.Nonnegatives)
+	COSMO.assemble!(model, Q, q, cn, x0=x0, settings=settings)
+	res = COSMO.optimize!(model)
+	
+	return res.x, res.y
 end
 
 
@@ -43,12 +52,12 @@ function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::V
 	return t*Q + H_sketch'*H_sketch
 end
 
-
-
 # Solve Chebyshev Center LP
 function cheby_lp(A, b, ps, sketch_type)
 	model = Model(GLPK.Optimizer)
-	@variable(model, 0 ≤ r ≤ 1e2)
+	#set_optimizer_attribute(model, "tol_obj", 1e-2)
+	#set_optimizer_attribute(model, "tm_lim", 10000)
+	@variable(model, 0 ≤ r ≤ 1)
 	@variable(model, x_c[1:size(A, 2)])
 	@objective(model, Max, r)
 
@@ -66,15 +75,34 @@ function cheby_lp(A, b, ps, sketch_type)
 
 	if termination_status(model) == MOI.OPTIMAL
 		return value.(x_c), value.(r)
+	elseif termination_status(model) == MOI.TIME_LIMIT
+		isfeas = is_feasible(A, b, value.(x_c))
+		println("Sol feasiblility ", isfeas)
+		
+		if isfeas
+			return value.(x_c), value.(r)
+		else
+			error("CHEB: Couldn't find a feasible point in time.")
+		end
 	else
 		@show termination_status(model)
 		error("Chebyshev center error!")
 	end
 end
 
+function feasibility_lp(A, b)
+	model = Model(GLPK.Optimizer)
+	@variable(model, x[1:size(A, 2)])
+	@objective(model, Min, 0)
+	@constraint(model, A*x .≤ b)
+	
+	optimize!(model)
+	
+	return value.(x), 1.0
+end
 
 # 3 < μ < 100 act roughly the same according to cvx book
-function newton_sketch(Q, q, A, b, sketch_dim, sketch_type; β=2.0, tol=1e-3, μ=10)
+function newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc; β=2.0, tol=1e-3, μ=10)
 	if sketch_type == :Uniform
 		ps = ones(length(b))
 	elseif sketch_type == :Row_Norm
@@ -85,7 +113,9 @@ function newton_sketch(Q, q, A, b, sketch_dim, sketch_type; β=2.0, tol=1e-3, μ
 		error("Invalid Sketch Type")
 	end
 
-	x, rc = cheby_lp(A, b, ps, sketch_type)
+	#@time x, rc = cheby_lp(A, b, ps, sketch_type)
+	#@time x, rc = feasibility_lp(A, b)
+	x = x0
 	m = length(b)
 	t = 1.
 	
@@ -157,7 +187,7 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 		end
 
 		# This condition also holds when the search dir is wrong.
-		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-6, ϵᵣ=1e-6, ϵ_g=1e-6, max_iters=80)
+		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-7, ϵᵣ=1e-7, ϵ_g=1e-6, max_iters=80)
 
 		if terminate
 			println("Last α: ", α)
@@ -237,9 +267,9 @@ function ∇loss(x, ŷ, y_true, λ, λ˜, Q, A, b, S, G, h, T)
 end
 
 
-n = 100
-nc = 2000
-sketch_dim = 50
+n = 200
+nc = 4000
+sketch_dim = 400
 sketch_type = :Row_Norm # :Uniform, :Row_Norm, :Full
 A = randn(nc, n)
 z = randn(n, 1)
@@ -247,12 +277,14 @@ b = vec(A * z + rand(nc))
 
 R = randn(n, n)
 Q = R' * R + 0.01 * I
-q = 1000.0 * randn(n)
+q = randn(n)
 
-@time x_ours_not, λ_ours_not = newton_sketch(Q, q, A, b, sketch_dim, :Full, tol=1e-4, μ=10)
-@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, sketch_type, tol=1e-4, μ=10)
+@time x0, rc = cheby_lp(A, b, ones(length(b)), :Uniform)
+
+@time x_ours_not, λ_ours_not = newton_sketch(Q, q, A, b, sketch_dim, :Full, x0, rc, tol=1e-4, μ=10)
+@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc, tol=1e-4, μ=10)
 # @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
-@time x_cosmo, λ_cosmo = solve_COSMO(Q, q, A, b)
+@time x_cosmo, λ_cosmo = solve_COSMO2(Q, q, A, b, x0)
 
 y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
 y_ours_not = 0.5*x_ours_not⋅(Q*x_ours_not) + q⋅x_ours_not
