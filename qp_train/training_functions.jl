@@ -1,36 +1,17 @@
-using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO#, ProfileView
+using LinearAlgebra, JuMP, GLPK, Ipopt, Random, COSMO, StatsBase#, ProfileView
 
-function test_OSQP()
-	n = 100
-	nc = 10000
-	A = randn(nc, n)
-	z = randn(n, 1)
-	b = A * z + rand(nc, 1)
-	
-	R = randn(n, n)
-	Q = R' * R + 0.01 * I
-	q = 1000.0 * randn(n, 1)
-	
-	#(y, u) = solve_OSQP(Q, q, A, b)
-	#(y2, u2) = solve_IPOPT(Q, q, A, b)
-	(y3, u3) = solve_COSMO(Q, q, A, b)
-	
-	@show(maximum(A * y3 - b))
-	#@show(maximum(A * y2 - b))
-	#@show(maximum(A * y3 - b))
-	
-	return
-end
 
 function solve_COSMO(Q, q, A, b)
 	model = Model(COSMO.Optimizer)
 	set_optimizer_attribute(model, "max_iter", 10000)
+	set_optimizer_attribute(model, "eps_abs", 1e-1)
+	set_optimizer_attribute(model, "verbose", false)
 	@variable(model, y[1:length(q)])
 	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
 	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
 	optimize!(model)
 
-	if termination_status(model) == MOI.OPTIMAL # I don't like how JuMP doesn't recognize this as being a global solution
+	if termination_status(model) == MOI.OPTIMAL
 		return value.(y), dual.(con_μ)
 	else
 		@show termination_status(model)
@@ -38,23 +19,6 @@ function solve_COSMO(Q, q, A, b)
 	end
 end
 
-# function solve_OSQP(Q, q, A, b)
-# 	model = Model(OSQP.Optimizer)
-# 	set_optimizer_attribute(model, "verbose", 0)
-# 	set_optimizer_attribute(model, "eps_prim_inf", 1e-6)
-# 	set_optimizer_attribute(model, "adaptive_rho", 0)
-# 	@variable(model, y[1:length(q)])
-# 	@objective(model, Min, 0.5 * y' * Q * y + dot(q, y))
-# 	@constraint(model, con_μ[i in 1:length(b)],  dot(A[i,:], y) <= b[i])
-# 	optimize!(model)
-
-# 	if termination_status(model) == MOI.OPTIMAL # I don't like how JuMP doesn't recognize this as being a global solution
-# 		return value.(y), dual.(con_μ)
-# 	else
-# 		@show termination_status(model)
-# 		error("QP error!")
-# 	end
-# end
 
 function solve_IPOPT(Q, q, A, b)
 	model = Model(Ipopt.Optimizer)
@@ -72,26 +36,30 @@ function solve_IPOPT(Q, q, A, b)
 	end
 end
 
-function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::Vector{Float64}, x::Vector{Float64}, sketch_dim::Int64)
-	Ones = [rand(1:n) for i in 1:sketch_dim]
+function sketch_hessian(Q::Matrix{Float64}, t::Float64, A::Matrix{Float64}, r::Vector{Float64}, x::Vector{Float64}, sketch_dim::Int64, ps::Vector{Float64})
+	Ones = sample(1:length(r), Weights(ps ./ abs.(r)), sketch_dim)
+	# Ones = [rand(1:length(r)) for i in 1:sketch_dim]
 	H_sketch = Diagonal(1 ./ abs.(r[Ones]))*A[Ones, :]
-	#S = S_count(sketch_dim, length(r))
 	return t*Q + H_sketch'*H_sketch
 end
 
-function S_count(sketch_dim, n)
-	return S = [rand(1:n) == j for i in 1:sketch_dim, j in 1:n] # one nonzero per row to sample rows from root_hess
-end
+
 
 # Solve Chebyshev Center LP
-function cheby_lp(A, b)
+function cheby_lp(A, b, ps, sketch_type)
 	model = Model(GLPK.Optimizer)
 	@variable(model, 0 ≤ r ≤ 1e2)
 	@variable(model, x_c[1:size(A, 2)])
 	@objective(model, Max, r)
 
-	for i in 1:length(b)
-		@constraint(model, dot(A[i,:],x_c) + r*norm(A[i,:]) ≤ b[i])
+	if sketch_type == :Row_Norm
+		for i in 1:length(b)
+			@constraint(model, dot(A[i,:],x_c) + r*ps[i] ≤ b[i])
+		end
+	else
+		for i in 1:length(b)
+			@constraint(model, dot(A[i,:],x_c) + r*norm(A[i,:]) ≤ b[i])
+		end
 	end
 
 	optimize!(model)
@@ -104,39 +72,27 @@ function cheby_lp(A, b)
 	end
 end
 
-function get_feasible_start(A, b)
-	model = Model(GLPK.Optimizer)
-	@variable(model, -0.1 ≤ s)
-	@variable(model, x[1:size(A, 2)])
-	@objective(model, Min, s)
-	@constraint(model, A * x - b .≤ s)
 
-	optimize!(model)
-
-	if termination_status(model) == MOI.OPTIMAL
-		if value(s) ≤ 0.0
-			return value.(x)
-		else
-			error("Couldn't find a starting location")
-		end
+# 3 < μ < 100 act roughly the same according to cvx book
+function newton_sketch(Q, q, A, b, sketch_dim, sketch_type; β=2.0, tol=1e-3, μ=10)
+	if sketch_type == :Uniform
+		ps = ones(length(b))
+	elseif sketch_type == :Row_Norm
+		ps = [norm(A[i,:]) for i in 1:length(b)]
+	elseif sketch_type == :Full
+		ps = similar(b)
 	else
-		@show termination_status(model)
-		error("Could not find a feasible start error!")
+		error("Invalid Sketch Type")
 	end
-end
 
-# 3<μ100 act roughly the same according to cvx book
-function newton_sketch(Q, q, A, b, sketch_dim; β=2.0, tol=1e-3, μ=10)
-	x, rc = cheby_lp(A, b)
-	#x = get_feasible_start(A, b)
-	#rc = 1e2
+	x, rc = cheby_lp(A, b, ps, sketch_type)
 	m = length(b)
 	t = 1.
 	
 	x_old = x # Clean up after debugging
 	while true 
 		println("----------------- Inner Iterations --------------------")
-		x = newton_subproblem(x, Q, q, A, b, t, rc, β)
+		x = newton_subproblem(x, Q, q, A, b, t, rc, β, ps, sketch_type)
 		if m / t < tol # if t=m/tol then y_opt is within tol of the true solution 
 			break
 		end
@@ -160,7 +116,7 @@ function is_feasible(A::Matrix{Float64}, b::Vector{Float64}, x::Vector{Float64})
 end
 
 # minimize t*x'Qx + t*q'x + log_barrier
-function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64, rc::Float64, β::Float64; ϵ=1e-6)
+function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Float64}, A::Matrix{Float64}, b::Vector{Float64}, t::Float64, rc::Float64, β::Float64, ps::Vector{Float64}, sketch_type; ϵ=1e-6)
 	terminate = false
 	i = 1
 	x_old, y, r = similar(x), 0.0, similar(b)
@@ -169,12 +125,15 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 
 		# compute direction
 		∇ = t*Q*x + t*q + 1 ./ A'*r
-		#H = sketch_hessian(Q, t, A, r, x, sketch_dim)
-		H = t*Q + A'*Diagonal([1/(r[i])^2 for i in 1:length(b)])*A
+		if sketch_type == :Full
+			H = t*Q + A'*Diagonal([1/(r[i])^2 for i in 1:length(b)])*A
+		else
+			H = sketch_hessian(Q, t, A, r, x, sketch_dim, ps)
+		end
+		
 		dir = -normalize(vec(H \ ∇))
 
 		# line search
-		#α = α_upper(A, b, x, dir) - ϵ
 		α = 2.0 * rc
 		while true
 			x_temp = x + α * dir
@@ -198,7 +157,7 @@ function newton_subproblem(x::Vector{Float64}, Q::Matrix{Float64}, q::Vector{Flo
 		end
 
 		# This condition also holds when the search dir is wrong.
-		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-6, ϵᵣ=1e-6, ϵ_g=1e-6, max_iters=40)
+		terminate = Terminate(x_old, y_old, x, y, ∇, i; ϵₐ=1e-6, ϵᵣ=1e-6, ϵ_g=1e-6, max_iters=80)
 
 		if terminate
 			println("Last α: ", α)
@@ -278,9 +237,10 @@ function ∇loss(x, ŷ, y_true, λ, λ˜, Q, A, b, S, G, h, T)
 end
 
 
-n = 10
+n = 100
 nc = 2000
-sketch_dim = 200
+sketch_dim = 50
+sketch_type = :Row_Norm # :Uniform, :Row_Norm, :Full
 A = randn(nc, n)
 z = randn(n, 1)
 b = vec(A * z + rand(nc))
@@ -289,13 +249,19 @@ R = randn(n, n)
 Q = R' * R + 0.01 * I
 q = 1000.0 * randn(n)
 
-@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, tol=1e-1, μ=10)
-@time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
+@time x_ours_not, λ_ours_not = newton_sketch(Q, q, A, b, sketch_dim, :Full, tol=1e-4, μ=10)
+@time x_ours, λ_ours = newton_sketch(Q, q, A, b, sketch_dim, sketch_type, tol=1e-4, μ=10)
+# @time x_ipopt, λ_ipopt = solve_IPOPT(Q, q, A, b)
+@time x_cosmo, λ_cosmo = solve_COSMO(Q, q, A, b)
 
-y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
 y_ours = 0.5*x_ours⋅(Q*x_ours) + q⋅x_ours
+y_ours_not = 0.5*x_ours_not⋅(Q*x_ours_not) + q⋅x_ours_not
+# y_ipopt = 0.5*x_ipopt⋅(Q*x_ipopt) + q⋅x_ipopt
+y_cosmo = 0.5*x_cosmo⋅(Q*x_cosmo) + q⋅x_cosmo
 
-println("Ipopt Cost: ", y_ipopt)
 println("Our Cost: ", y_ours)
+println("Our Unsketched Cost: ", y_ours_not)
+# println("Ipopt Cost: ", y_ipopt)
+println("Cosmo Cost: ", y_cosmo)
 
 #@profview newton_sketch(Q, q, A, b, sketch_dim, tol=1e-3, μ=10)
