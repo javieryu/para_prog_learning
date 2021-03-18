@@ -289,8 +289,8 @@ function ∇loss3(ŷ, λ_, y, λ, Q, A, b)
     ∂b̂ = vcat(zeros(length(ŷ), length(λ_)), -Diagonal(λ_))
 	∂b = vcat(zeros(length(y), length(λ)), -Diagonal(λ))
 	
-	g1 = ∂K_ \ ∂b̂
-	g2 = ∂K \ ∂b
+	g1 = inv(∂K_) * ∂b̂
+	g2 = inv(∂K) * ∂b
 
 	return dot(g1, g2) / (norm(g1) * norm(g2))
 end
