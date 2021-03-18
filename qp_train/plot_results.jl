@@ -1,4 +1,4 @@
-using JLD2, FileIO, Statistics, Plots
+using JLD2, FileIO, Statistics, Plots, LinearAlgebra
 pyplot()
 close("all")
 
@@ -9,7 +9,7 @@ function rel_norm_mats(A, B)
     nB = [norm(B[:, i]) for i in 1:size(A, 2)]
     return ndiff ./ nB
 end
-data = load("QPresults.jld2")
+data = load("QPresultsNEW.jld2")
 
 td = data["time_dict"]
 cod= data["cost_dict"]
@@ -17,7 +17,7 @@ nd = data["norm_dict"]
 ld = data["λ_dict"]
 xd = data["x_dict"]
 
-base_method = "Cosmo"
+base_method = "Full"
 sketch_dims = collect(keys(td["Full"]))
 sort!(sketch_dims)
 niters = size(td["Full"][sketch_dims[1]], 1)
@@ -68,13 +68,13 @@ mean_times_cosmo = mean(all_times_cosmo) * ones(length(sketch_dims))
 std_times_full = std(all_times_full) * ones(length(sketch_dims))
 std_times_cosmo = std(all_times_cosmo) * ones(length(sketch_dims))
 
-tplt = plot(sketch_dims, mean_times[:, 1], ribbon=std_times[:, 1], fillalpha=0.2, label="Uniform")
+tplt = plot(sketch_dims, mean_times_full, ribbon=std_times_full, fillalpha=0.2, label="Full")
+plot!(tplt, sketch_dims, mean_times[:, 1], ribbon=std_times[:, 1], fillalpha=0.2, label="Uniform")
 plot!(tplt, sketch_dims, mean_times[:, 2], ribbon=std_times[:, 2], fillalpha=0.2, label="Row Norm")
-plot!(tplt, sketch_dims, mean_times_full, ribbon=std_times_full, fillalpha=0.2, label="Full")
 #plot!(tplt, sketch_dims, mean_times_cosmo, ribbon=std_times_cosmo, fillalpha=0.2, label="Cosmo")
 title!("Timing")
 xaxis!("Sketch Dimension")
-yaxis!("Time")
+yaxis!("Time (s)")
 display(tplt)
 savefig(tplt, "timing.png")
 

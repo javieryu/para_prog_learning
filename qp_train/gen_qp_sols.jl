@@ -14,7 +14,7 @@ function gen_data(n, nc)
 end
 
 
-# (200, 4000, 20, [10 ,50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000])
+# (200, 4000, 12, [10 ,50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000])
 function gen_results(n, nc, iters, sketch_dims)
 	time_dict = Dict{String, Dict{Int64, Vector{Float64}} }() # solve type -> sketch_dim -> vector of times
 	cost_dict = Dict{String, Dict{Int64, Vector{Float64}} }() # solve type -> sketch_dim -> vector of costs
@@ -61,9 +61,9 @@ function gen_results(n, nc, iters, sketch_dims)
 			cost_dict["Row_Norm"][sketch_dim][i] = 0.5*x_norm⋅(Q*x_norm)
 			cost_dict["Cosmo"][sketch_dim][i] = 0.5*x_cosmo⋅(Q*x_cosmo)
 
-			norm_dict["Full"][sketch_dim][i] = ∇loss2(x_full, λ_full, x_cosmo, λ_cosmo, Q, A, b)
-			norm_dict["Uniform"][sketch_dim][i] = ∇loss2(x_uniform, λ_uniform, x_cosmo, λ_cosmo, Q, A, b)
-			norm_dict["Row_Norm"][sketch_dim][i] = ∇loss2(x_norm, λ_norm, x_cosmo, λ_cosmo, Q, A, b)			
+			norm_dict["Full"][sketch_dim][i] = ∇loss3(x_full, λ_full, x_cosmo, λ_cosmo, Q, A, b)
+			norm_dict["Uniform"][sketch_dim][i] = ∇loss3(x_uniform, λ_uniform, x_full, λ_full, Q, A, b)
+			norm_dict["Row_Norm"][sketch_dim][i] = ∇loss3(x_norm, λ_norm, x_full, λ_full, Q, A, b)			
 
 			x_dict["Full"][sketch_dim][:,i] = x_full
 			x_dict["Uniform"][sketch_dim][:,i] = x_uniform
@@ -76,5 +76,5 @@ function gen_results(n, nc, iters, sketch_dims)
 			λ_dict["Cosmo"][sketch_dim][:,i] = λ_cosmo
 		end
 	end
-	@save "QPresultsNEW.jld2" time_dict cost_dict norm_dict x_dict λ_dict
+	@save "QPresultsNEWNEW.jld2" time_dict cost_dict norm_dict x_dict λ_dict
 end

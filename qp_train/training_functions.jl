@@ -279,6 +279,21 @@ function ∇loss2(ŷ, λ_, y, λ, Q, A, b)
 	return norm(inv(∂K_)*∂b̂ - inv(∂K)*∂b) / norm(inv(∂K)*∂b)
 end
 
+# Cosine Similarity
+function ∇loss3(ŷ, λ_, y, λ, Q, A, b)
+	∂K_ = [Q                A';
+		  Diagonal(λ_)*A    Diagonal(A*ŷ - b)]
+	∂K = [Q                A';
+		  Diagonal(λ)*A    Diagonal(A*y - b)]  
+
+    ∂b̂ = vcat(zeros(length(ŷ), length(λ_)), -Diagonal(λ_))
+	∂b = vcat(zeros(length(y), length(λ)), -Diagonal(λ))
+	
+	g1 = ∂K_ \ ∂b̂
+	g2 = ∂K \ ∂b
+
+	return dot(g1, g2) / (norm(g1) * norm(g2))
+end
 
 #n = 200
 #nc = 4000
