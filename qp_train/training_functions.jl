@@ -131,7 +131,7 @@ function newton_sketch(Q, q, A, b, sketch_dim, sketch_type, x0, rc; β=2.0, tol=
 	end
 	
 	# println("--------------------- Done Ours ------------------------------")
-	λ = [-1 / t*(A[i,:]⋅x - b[i]) for i in 1:length(b)]
+	λ = [-1 / (t*(A[i,:]⋅x - b[i])) for i in 1:length(b)]
 	return x, λ
 end
 
@@ -272,7 +272,11 @@ function ∇loss2(ŷ, λ_, y, λ, Q, A, b)
 		  Diagonal(λ_)*A    Diagonal(A*ŷ - b)]
 	∂K = [Q                A';
 		  Diagonal(λ)*A    Diagonal(A*y - b)]  
-	return norm(∂K_ - ∂K)
+
+    ∂b̂ = vcat(zeros(length(ŷ), length(λ_)), -Diagonal(λ_))
+	∂b = vcat(zeros(length(y), length(λ)), -Diagonal(λ))
+
+	return norm(inv(∂K_)*∂b̂ - inv(∂K)*∂b) / norm(inv(∂K)*∂b)
 end
 
 

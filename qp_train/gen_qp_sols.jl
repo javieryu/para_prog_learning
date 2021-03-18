@@ -14,7 +14,7 @@ function gen_data(n, nc)
 end
 
 
-# (200, 4000, 10, [10 ,50, 100, 200, 500, 1000, 1500, 2000])
+# (200, 4000, 20, [10 ,50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000])
 function gen_results(n, nc, iters, sketch_dims)
 	time_dict = Dict{String, Dict{Int64, Vector{Float64}} }() # solve type -> sketch_dim -> vector of times
 	cost_dict = Dict{String, Dict{Int64, Vector{Float64}} }() # solve type -> sketch_dim -> vector of costs
@@ -76,5 +76,5 @@ function gen_results(n, nc, iters, sketch_dims)
 			λ_dict["Cosmo"][sketch_dim][:,i] = λ_cosmo
 		end
 	end
-	@save "QPresults.jld2" time_dict cost_dict norm_dict x_dict λ_dict
+	@save "QPresultsNEW.jld2" time_dict cost_dict norm_dict x_dict λ_dict
 end
